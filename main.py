@@ -35,9 +35,17 @@ HEADERS = {
 }
 
 # ============================================================
-#   КОНСТАНТЫ
+#   КОНСТАНТЫ И МАСТИ
 # ============================================================
+# Масти: 0: ♠️, 1: ♣️, 2: ♦️, 3: ♥️
 SUITS = {0: "♠️", 1: "♣️", 2: "♦️", 3: "♥️"}
+
+SUIT_MAPPING = {
+    1: 2,  # ♣️ Трефы -> ♦️ Буби
+    3: 2,  # ♥️ Черви -> ♦️ Буби
+    2: 3,  # ♦️ Буби  -> ♥️ Черви
+    0: 0   # ♠️ Пики  -> ♠️ Пики
+}
 
 CARD_VALUES = {
     14: "A", 2: "2", 3: "3", 4: "4", 5: "5", 6: "6",
@@ -59,7 +67,7 @@ current_prediction = {
     "predicted_suit_code": None,
     "predicted_exact_card": None,
     "target_recipient": None,
-    "confidence": 50,
+    "confidence": 85,
     "target_game_num": None,
     "dogen_level": 1,
     "is_active": False,
@@ -115,96 +123,37 @@ def parse_cards_detail(cards_str):
         return [], [], []
 
 # ============================================================
-#   🧠 ПРОДВИНУТЫЙ ПРЕДИКТИВНЫЙ ДВИЖОК
+#   🧠 ОБНОВЛЕННЫЙ ПРЕДИКТИВНЫЙ ДВИЖОК
 # ============================================================
 
 def get_base_prediction(first_card_value):
-    """Базовая стратегия матрицы триггеров"""
+    """Логика базовых триггеров"""
     if first_card_value == 6:
         return 13, "K (Король)"
-    elif first_card_value in [10, 7, 9]:
+    elif first_card_value in [7, 9, 10]:
         return 12, "Q (Дама)"
     elif first_card_value == 8:
         return 11, "J (Валет)"
     else:
-        return 1, "A (Туз)"
+        return 14, "A (Туз)"
 
-def calculate_advanced_prediction(trigger_val, trigger_suit, history):
+def calculate_advanced_prediction(trigger_val, trigger_suit):
     """
-    МАКСИМИЗАЦИЯ ТОЧНОСТИ:
-    1. Марковский анализ переходов (преимущество исторической цепочки)
-    2. Поиск масти методом возврата к среднему
-    3. Волновой расчёт адресата (P1 vs P2)
+    Расчет прогноза:
+    1. Карта определяется строго по 1-й карте Дилера (P2)
+    2. Масть преобразуется согласно жестким правилам SUIT_MAPPING
     """
-    base_val, base_sym = get_base_prediction(trigger_val)
-    recent_games = list(history.values())[-35:] # Анализ 35 последних игр
-
-    if len(recent_games) < 10:
-        exact_card = f"{CARD_VALUES.get(base_val, base_val)}{SUITS.get(trigger_suit, '')}"
-        return base_val, base_sym, trigger_suit, exact_card, "👤 Игрок (P1)", 65
-
-    # --- 1. ОПРЕДЕЛЕНИЕ ОПТИМАЛЬНОГО ЗНАЧЕНИЯ (Марковский переход) ---
-    transitions = defaultdict(list)
-    ordered_nums = sorted(history.keys())
-    for i in range(len(ordered_nums) - 3):
-        g_curr = history[ordered_nums[i]]
-        g_target = history[ordered_nums[i+3]]
-        
-        t_card = g_curr.get("player_first_card")
-        target_all_cards = g_target.get("player_values", []) + g_target.get("dealer_values", [])
-        if t_card is not None:
-            transitions[t_card].extend(target_all_cards)
-
-    # Если по цепочке исторически преобладает другое значение — корректируем
-    final_val = base_val
-    if transitions[trigger_val]:
-        most_common_historical = Counter(transitions[trigger_val]).most_common(1)[0][0]
-        if most_common_historical in [1, 11, 12, 13]:
-            final_val = most_common_historical
-            base_sym = f"{CARD_VALUES.get(final_val)} ({'Туз' if final_val==1 else 'Валет' if final_val==11 else 'Дама' if final_val==12 else 'Король'})"
-
-    # --- 2. РАСЧЕТ ТОЧНОЙ МАСТИ (Задержавшаяся масть) ---
-    suit_counts = Counter()
-    for g in recent_games:
-        for cv, cs in g.get("player_full_cards", []) + g.get("dealer_full_cards", []):
-            if cv == final_val or (final_val == 1 and cv in [1, 14]):
-                suit_counts[cs] += 1
-
-    # Ищем масть с наименьшей частотой за последние игры для эффекта компенсации
-    all_possible_suits = [0, 1, 2, 3]
-    missing_suits = [s for s in all_possible_suits if s not in suit_counts]
+    pred_val, pred_sym = get_base_prediction(trigger_val)
     
-    if missing_suits:
-        best_suit = missing_suits[0]
-    else:
-        # Берем самую редкую из всех
-        best_suit = suit_counts.most_common()[-1][0]
+    # Определение итоговой масти
+    target_suit = SUIT_MAPPING.get(trigger_suit, 0)
+    
+    exact_card_str = f"{CARD_VALUES.get(pred_val, pred_val)}{SUITS.get(target_suit, '')}"
+    
+    recipient = "🎩 Дилер (P2)"
+    confidence = 85
 
-    exact_card_str = f"{CARD_VALUES.get(final_val, final_val)}{SUITS.get(best_suit, '')}"
-
-    # --- 3. АДРЕСАТ P1/P2 И РАСЧЕТ ПРОЦЕНТА УВЕРЕННОСТИ ---
-    p1_streak = 0
-    p2_streak = 0
-    for g in recent_games:
-        p1_has = any((cv == final_val or (final_val == 1 and cv in [1, 14])) for cv, _ in g.get("player_full_cards", []))
-        p2_has = any((cv == final_val or (final_val == 1 and cv in [1, 14])) for cv, _ in g.get("dealer_full_cards", []))
-        if p1_has: p1_streak += 1
-        if p2_has: p2_streak += 1
-
-    total_hits = p1_streak + p2_streak
-    if total_hits > 0:
-        p1_prob = (p1_streak / total_hits) * 100
-    else:
-        p1_prob = 50.0
-
-    if p1_prob >= 50.0:
-        recipient = "👤 Игрок (P1)"
-        confidence = int(min(max(p1_prob + 15, 65), 96))
-    else:
-        recipient = "🎩 Дилер (P2)"
-        confidence = int(min(max((100 - p1_prob) + 15, 65), 96))
-
-    return final_val, base_sym, best_suit, exact_card_str, recipient, confidence
+    return pred_val, pred_sym, target_suit, exact_card_str, recipient, confidence
 
 # ============================================================
 #   ОТПРАВКА И ОБНОВЛЕНИЕ В TELEGRAM
@@ -304,8 +253,6 @@ def check_prediction_for_game(player_values, dealer_values, predicted_val):
         return False
     all_values = player_values + dealer_values
     for val in all_values:
-        if predicted_val == 1 and val in [1, 14]:
-            return True
         if val == predicted_val:
             return True
     return False
@@ -319,13 +266,13 @@ def check_detailed_prediction_for_game(p1_full, p2_full, predicted_val, predicte
     exact_hit = False
 
     for cv, _ in check_cards:
-        if (predicted_val == 1 and cv in [1, 14]) or (cv == predicted_val):
+        if cv == predicted_val:
             val_hit = True
             break
 
     if predicted_suit is not None:
         for cv, cs in (p1_full + p2_full):
-            if ((predicted_val == 1 and cv in [1, 14]) or (cv == predicted_val)) and cs == predicted_suit:
+            if cv == predicted_val and cs == predicted_suit:
                 exact_hit = True
                 break
 
@@ -335,7 +282,6 @@ def finalize_prediction(status_code, exact_hit=False):
     if not current_prediction.get("is_active"):
         return
 
-    target_num = current_prediction["target_game_num"]
     res_str = {0: "✅0️⃣", 1: "✅1️⃣", 2: "✅2️⃣"}.get(status_code, "❌")
     if exact_hit and status_code >= 0:
         res_str += " 🎯 (ТОЧНАЯ КАРТА!)"
@@ -397,30 +343,17 @@ def process_prediction_check(game_num, p1_values, p2_values, p1_full, p2_full):
         else:
             finalize_prediction(-1, False)
 
-def process_new_prediction(game_num, first_card_value, first_card_suit):
-    if not first_card_value or game_num == 0:
+def process_new_prediction(game_num, dealer_first_val, dealer_first_suit):
+    if dealer_first_val is None or game_num == 0:
         return
 
     if current_prediction.get("is_active"):
         return
 
-    # Вычисление улучшенного прогноза
+    # Вычисление прогноза по картам Дилера (P2)
     pred_val, pred_sym, best_suit, exact_card_str, recipient, confidence = calculate_advanced_prediction(
-        first_card_value, first_card_suit, game_history
+        dealer_first_val, dealer_first_suit
     )
-
-    # 🛡️ ФИЛЬТР ВЫСОКОЙ ТОЧНОСТИ #1 (Пропуск низковероятных сигналов)
-    if confidence < 65:
-        print(f"⚠️ Прогноз пропущен: низкий уровень уверенности ({confidence}%).")
-        return
-
-    # 🛡️ ФИЛЬТР ВЫСОКОЙ ТОЧНОСТИ #2 (Фильтр перегрева)
-    if game_history:
-        last_game = list(game_history.values())[-1]
-        last_cards = last_game.get("player_values", []) + last_game.get("dealer_values", [])
-        if pred_val in last_cards or (pred_val == 1 and 14 in last_cards):
-            print(f"⚠️ Прогноз {pred_sym} пропущен: карта выпадала в прошлой игре.")
-            return
 
     target_num = normalize_game_num(game_num + 3)
 
@@ -465,7 +398,7 @@ def get_active_games_info(session):
 
 def main():
     global active_games, game_history
-    print("🚀 Бот запущен (Продвинутый модуль прогнозирования активирован)...")
+    print("🚀 Бот запущен (Обновленный модуль прогноза P2 активирован)...")
     session = requests.Session()
 
     while True:
@@ -526,13 +459,14 @@ def main():
                 if current_prediction.get("is_active") and game_num == current_prediction["target_game_num"]:
                     update_live_prediction_cards(p1_cards, p2_cards)
 
-                # Завершение игры и расчет
+                # Завершение игры и расчет прогноза
                 if is_finished and game_num not in game_history:
-                    first_card_value = p1_values[0] if p1_values else None
-                    first_card_suit = p1_full[0][1] if p1_full else None
+                    # Извлечение первой карты Дилера (P2)
+                    dealer_first_val = p2_values[0] if p2_values else None
+                    dealer_first_suit = p2_full[0][1] if p2_full else None
 
                     game_history[game_num] = {
-                        "player_first_card": first_card_value,
+                        "dealer_first_card": dealer_first_val,
                         "player_values": p1_values,
                         "dealer_values": p2_values,
                         "player_full_cards": p1_full,
@@ -543,12 +477,12 @@ def main():
                         oldest = min(game_history.keys())
                         del game_history[oldest]
 
-                    print(f"📝 Игра #{game_num} завершена | Карта: {first_card_value} масть {first_card_suit}")
+                    print(f"📝 Игра #{game_num} завершена | Карта Дилера (P2): {dealer_first_val} масть {dealer_first_suit}")
 
                     process_prediction_check(game_num, p1_values, p2_values, p1_full, p2_full)
                     
                     if not current_prediction.get("is_active"):
-                        process_new_prediction(game_num, first_card_value, first_card_suit)
+                        process_new_prediction(game_num, dealer_first_val, dealer_first_suit)
 
                 # Трансляция хода текущей игры
                 current_state = f"{p1_score}_{p2_score}_{'_'.join(p1_cards)}_{'_'.join(p2_cards)}_{is_finished}"
